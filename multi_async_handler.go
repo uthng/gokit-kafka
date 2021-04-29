@@ -2,80 +2,119 @@ package kafka
 
 import (
 	"context"
+	"errors"
 
 	"github.com/Shopify/sarama"
+	"github.com/spf13/cast"
 
 	log "github.com/uthng/golog"
 )
 
-type MultiAsyncCG struct {
+var (
+	ErrConsumerTopicsMissing = errors.New("consumer topics is missing")
+)
+
+type multiAsyncCG struct {
 	context context.Context
 
-	CG sarama.ConsumerGroup
+	cg sarama.ConsumerGroup
 
-	Topics  []string
-	GroupID string
+	topics     []string
+	groupID    string
+	nbWorkers  int
+	bufferSize int
 
-	NbWorkers  int
-	BufferSize int
+	cfg map[string]interface{}
 
-	producer *AsyncProducer
-	handlers ConsumerHandlers
+	producer ProducerHandler
+	handlers ConsumerMsgHandlers
 
-	CfgHandler MultiAsyncCGHandlerConfig
+	cfgHandler multiAsyncCGHandlerConfig
 }
 
-type MultiAsyncCGHandlerConfig struct {
-	BufChan chan *ConsumerSessionMessage
+type multiAsyncCGHandlerConfig struct {
+	bufChan chan *ConsumerSessionMessage
 
 	ready chan bool
 }
 
-func NewMultiAsyncCG(ctx context.Context, cg sarama.ConsumerGroup, topics []string, groupID string, nbWorkers, bufferSize int, producer *AsyncProducer, handlers ConsumerHandlers) *MultiAsyncCG {
-	macg := &MultiAsyncCG{
+func NewMultiAsyncCG(ctx context.Context, client sarama.Client, cfg map[string]interface{}, producer ProducerHandler, handlers ConsumerMsgHandlers) (ConsumerGroupHandler, error) {
+	groupID := "proxy-provisioner"
+	topics := []string{}
+	nbWorkers := 1
+	bufferSize := 10
+
+	m, ok := cfg["groupID"]
+	if ok {
+		groupID = cast.ToString(m)
+	}
+
+	cg, err := sarama.NewConsumerGroupFromClient(groupID, client)
+	if err != nil {
+		return nil, err
+	}
+
+	m, ok = cfg["topics"]
+	if !ok {
+		return nil, ErrConsumerTopicsMissing
+	}
+
+	topics = cast.ToStringSlice(m)
+
+	m, ok = cfg["nbWorkers"]
+	if ok {
+		nbWorkers = cast.ToInt(m)
+	}
+
+	m, ok = cfg["bufferSize"]
+	if ok {
+		bufferSize = cast.ToInt(m)
+	}
+
+	macg := &multiAsyncCG{
 		context:    ctx,
-		CG:         cg,
-		Topics:     topics,
-		GroupID:    groupID,
-		NbWorkers:  nbWorkers,
-		BufferSize: bufferSize,
+		cg:         cg,
+		topics:     topics,
+		groupID:    groupID,
+		nbWorkers:  nbWorkers,
+		bufferSize: bufferSize,
 		producer:   producer,
 		handlers:   handlers,
 	}
 
-	cfgHandler := MultiAsyncCGHandlerConfig{
-		BufChan: make(chan *ConsumerSessionMessage, bufferSize),
+	cfgHandler := multiAsyncCGHandlerConfig{
+		bufChan: make(chan *ConsumerSessionMessage, bufferSize),
 		ready:   make(chan bool, 0),
 	}
 
-	macg.CfgHandler = cfgHandler
+	macg.cfgHandler = cfgHandler
 
-	return macg
+	return macg, nil
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
-func (macg *MultiAsyncCG) Setup(sarama.ConsumerGroupSession) error {
+func (macg *multiAsyncCG) Setup(sarama.ConsumerGroupSession) error {
 	// Mark the consumer as ready
-	close(macg.CfgHandler.ready)
+	close(macg.cfgHandler.ready)
 	return nil
 }
 
 // Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
-func (macg *MultiAsyncCG) Cleanup(sarama.ConsumerGroupSession) error {
+func (macg *multiAsyncCG) Cleanup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
-func (macg *MultiAsyncCG) WaitReady() {
-	<-macg.CfgHandler.ready
+func (macg *multiAsyncCG) WaitReady() {
+	<-macg.cfgHandler.ready
 	return
 }
 
-func (macg *MultiAsyncCG) Reset() {
-	macg.CfgHandler.ready = make(chan bool, 0)
+func (macg *multiAsyncCG) Reset() {
+	macg.cfgHandler.ready = make(chan bool, 0)
 	return
 }
 
-func (macg *MultiAsyncCG) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+func (macg *multiAsyncCG) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 
 	// NOTE:
 	// Do not move the code below to a goroutine.
@@ -84,7 +123,7 @@ func (macg *MultiAsyncCG) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 	claimMsgChan := claim.Messages()
 
 	for message := range claimMsgChan {
-		macg.CfgHandler.BufChan <- &ConsumerSessionMessage{
+		macg.cfgHandler.bufChan <- &ConsumerSessionMessage{
 			Session: session,
 			Message: message,
 		}
@@ -93,14 +132,14 @@ func (macg *MultiAsyncCG) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 	return nil
 }
 
-func (macg *MultiAsyncCG) Close() error {
-	return macg.CG.Close()
+func (macg *multiAsyncCG) Close() error {
+	return macg.cg.Close()
 }
 
-func (macg *MultiAsyncCG) Start() {
+func (macg *multiAsyncCG) Start() {
 	go func() {
 		for {
-			err := macg.CG.Consume(macg.context, macg.Topics, macg)
+			err := macg.cg.Consume(macg.context, macg.topics, macg)
 			if err != nil {
 				if err == sarama.ErrClosedConsumerGroup {
 					break
@@ -118,9 +157,9 @@ func (macg *MultiAsyncCG) Start() {
 
 	macg.WaitReady() // Await till the consumer has been set up
 
-	for i := 0; i < macg.NbWorkers; i++ {
+	for i := 0; i < macg.nbWorkers; i++ {
 		go func() {
-			for message := range macg.CfgHandler.BufChan {
+			for message := range macg.cfgHandler.bufChan {
 				var err error
 
 				topic := message.Message.Topic

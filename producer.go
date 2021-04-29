@@ -13,14 +13,19 @@ import (
 )
 
 var (
-	ErrProducerHandlerNotFound = errors.New("producer handler not found")
+	ErrProducerMsgHandlerNotFound = errors.New("producer handler not found")
 )
 
-type AsyncProducer struct {
+type ProducerHandler interface {
+	Produce(msg interface{}, topic string) error
+	Close() error
+}
+
+type asyncProducer struct {
 	p sarama.AsyncProducer
 
 	ctx      context.Context
-	handlers ProducerHandlers
+	handlers ProducerMsgHandlers
 }
 
 // EncodeRequestFunc decodes mesages received by the consumer
@@ -33,19 +38,20 @@ type EncodeRequestFunc func(context.Context, interface{}) ([]byte, error)
 
 //type ConsumeRequestFunc func(context.Context, *ConsumerSessionMessage) (interface{}, error)
 
-type ProducerHandler struct {
+type ProducerMsgHandler struct {
 	Encode EncodeRequestFunc
 }
 
-type ProducerHandlers map[string]ProducerHandler
+type ProducerMsgHandlers map[string]ProducerMsgHandler
 
 // NewProducer creates an instance sarama async producer
-func NewAsyncProducer(ctx context.Context, brokers []string, handlers ProducerHandlers) (*AsyncProducer, error) {
-	producer, err := sarama.NewAsyncProducer(brokers, sarama.NewConfig())
+func NewAsyncProducer(ctx context.Context, client sarama.Client, handlers ProducerMsgHandlers) (ProducerHandler, error) {
+	producer, err := sarama.NewAsyncProducerFromClient(client)
 	if err != nil {
 		return nil, err
 	}
-	return &AsyncProducer{
+
+	return &asyncProducer{
 		p: producer,
 
 		ctx:      ctx,
@@ -54,13 +60,13 @@ func NewAsyncProducer(ctx context.Context, brokers []string, handlers ProducerHa
 }
 
 // Produce sends message to a specified topic
-func (p *AsyncProducer) Produce(request interface{}, topic string) error {
+func (p *asyncProducer) Produce(request interface{}, topic string) error {
 	var err error
 
 	handler, ok := p.handlers[topic]
 	if !ok {
 		log.Errorw("producer handler not found", "topic", topic)
-		return ErrProducerHandlerNotFound
+		return ErrProducerMsgHandlerNotFound
 	}
 
 	var msg []byte
@@ -88,7 +94,7 @@ func (p *AsyncProducer) Produce(request interface{}, topic string) error {
 }
 
 // Close teminates the instance
-func (p *AsyncProducer) Close() error {
+func (p *asyncProducer) Close() error {
 	if p != nil {
 		return p.p.Close()
 	}

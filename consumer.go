@@ -4,6 +4,9 @@ import (
 	"context"
 	//"encoding/json"
 	//"fmt"
+	//"errors"
+
+	//"github.com/spf13/cast"
 
 	"github.com/go-kit/kit/endpoint"
 	//"github.com/go-kit/kit/log"
@@ -35,13 +38,13 @@ type DecodeRequestFunc func(context.Context, interface{}) (request interface{}, 
 type EncodeResponseFunc func(context.Context, interface{}) ([]byte, error)
 
 // ProduceResponseFunc sends response message to a output topic after EncodeResponseFunc invoked
-type ProduceResponseFunc func(context.Context, interface{}, *AsyncProducer) error
+type ProduceResponseFunc func(context.Context, interface{}, ProducerHandler) error
 
 //type ConsumeRequestFunc func(context.Context, *ConsumerSessionMessage) (interface{}, error)
 
-// ConsumerHandler contains functions to handle encode/decode request/response messages
+// ConsumerMsgHandler contains functions to handle encode/decode request/response messages
 // and send response mesasges to output topics
-type ConsumerHandler struct {
+type ConsumerMsgHandler struct {
 	Endpoint endpoint.Endpoint
 
 	Decode DecodeRequestFunc
@@ -52,23 +55,20 @@ type ConsumerHandler struct {
 }
 
 // Handlers is a map between topic and specific handlers
-type ConsumerHandlers map[string]ConsumerHandler
+type ConsumerMsgHandlers map[string]ConsumerMsgHandler
 
 // NewConsumerGroup creates a new consumer group and returns a consumer group handler
-func NewConsumerGroup(ctx context.Context, brokers []string, topics []string, kind, groupID string, producer *AsyncProducer, handlers ConsumerHandlers) (ConsumerGroupHandler, error) {
-	cfg := sarama.NewConfig()
-	cfg.Version = sarama.V0_10_2_0
-	cfg.Consumer.Offsets.Initial = sarama.OffsetNewest
+func NewConsumerGroup(ctx context.Context, client sarama.Client, config map[string]interface{}, producer ProducerHandler, handlers ConsumerMsgHandlers) (ConsumerGroupHandler, error) {
+	kind := "multi-async"
 
-	client, err := sarama.NewConsumerGroup(brokers, groupID, cfg)
-	if err != nil {
-		return nil, err
+	m, ok := config["kind"]
+	if ok {
+		kind = m.(string)
 	}
 
 	if kind == "multi-async" {
-		cg := NewMultiAsyncCG(ctx, client, topics, groupID, 1, 10, producer, handlers)
-		return cg, nil
+		return NewMultiAsyncCG(ctx, client, config, producer, handlers)
 	}
 
-	return nil, err
+	return nil, nil
 }

@@ -6,6 +6,7 @@ import (
 	//"os"
 	//"os/signal"
 	//"syscall"
+	"bytes"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	//"github.com/golang/protobuf/jsonpb"
 	"github.com/go-kit/kit/endpoint"
 	"github.com/golang/protobuf/proto"
+	"github.com/spf13/viper"
 
 	log "github.com/uthng/golog"
 
@@ -28,7 +30,7 @@ import (
 //return msg.Message.Value, nil
 //}
 
-func produceResponse(ctx context.Context, data interface{}, producer *kafka.AsyncProducer) error {
+func produceResponse(ctx context.Context, data interface{}, producer kafka.ProducerHandler) error {
 	err := producer.Produce(data, "proxy-provisioner.tenant.proxy.changed")
 
 	return err
@@ -92,10 +94,10 @@ func TestConsumer(t *testing.T) {
 
 	//})
 	//}
-	brokers := []string{"localhost:9092"}
-	topics := []string{"plezi.tenant.proxy.changed"}
-	kind := "multi-async"
-	groupID := "proxy-provisioner"
+	//brokers := []string{"localhost:9092"}
+	//topics := []string{"plezi.tenant.proxy.changed"}
+	//kind := "multi-async"
+	//groupID := "proxy-provisioner"
 
 	pbReq := &pb.CreateProxyRequest{
 		TenantId: "tenant1",
@@ -106,23 +108,47 @@ func TestConsumer(t *testing.T) {
 		},
 	}
 
-	producerHandlers := map[string]kafka.ProducerHandler{
-		"plezi.tenant.proxy.changed": kafka.ProducerHandler{
+	kafkaConfig := []byte(`
+kafka:
+  brokers:
+    - localhost:9092
+  config:
+    offsetInitial: newest
+  consumer:
+    kind: multi-async
+    groupID: proxy-provisioner
+    nbWorkers: 1
+    bufferSize: 10
+    topics:
+      - plezi.tenant.proxy.changed
+  producer:
+    topics:
+      - name: proxy-provisioner.tenant.proxy.changed
+        event: tenantProxyChanged
+`)
+
+	viper.SetConfigType("yaml")
+	viper.ReadConfig(bytes.NewBuffer(kafkaConfig))
+
+	cfg := viper.GetStringMap("kafka")
+
+	pMsgHandlers := map[string]kafka.ProducerMsgHandler{
+		"plezi.tenant.proxy.changed": kafka.ProducerMsgHandler{
 			Encode: encodeRequest,
 		},
-		"proxy-provisioner.tenant.proxy.changed": kafka.ProducerHandler{
+		"proxy-provisioner.tenant.proxy.changed": kafka.ProducerMsgHandler{
 			Encode: nil,
 		},
 	}
 
-	producer, err := kafka.NewAsyncProducer(context.Background(), brokers, producerHandlers)
-	require.Nil(t, err)
+	//producer, err := kafka.NewAsyncProducer(context.Background(), brokers, producerHandlers)
+	//require.Nil(t, err)
 
-	err = producer.Produce(pbReq, topics[0])
-	require.Nil(t, err)
+	//err = producer.Produce(pbReq, topics[0])
+	//require.Nil(t, err)
 
-	handlers := map[string]kafka.ConsumerHandler{
-		"plezi.tenant.proxy.changed": kafka.ConsumerHandler{
+	cMsgHandlers := map[string]kafka.ConsumerMsgHandler{
+		"plezi.tenant.proxy.changed": kafka.ConsumerMsgHandler{
 			Endpoint: makeTestKafkaEndpoint(),
 			Decode:   decodeRequest,
 			Encode:   encodeResponse,
@@ -131,13 +157,22 @@ func TestConsumer(t *testing.T) {
 		},
 	}
 
-	cg, err := kafka.NewConsumerGroup(context.Background(), brokers, topics, kind, groupID, producer, handlers)
+	kafkaListener, err := kafka.NewListener(context.Background(), cfg, pMsgHandlers, cMsgHandlers)
 	require.Nil(t, err)
 
-	cg.Start()
+	//cg, err := kafka.NewConsumerGroup(context.Background(), brokers, topics, kind, groupID, producer, handlers)
+	//require.Nil(t, err)
+
+	//cg.Start()
+
+	kafkaListener.P.Produce(pbReq, "plezi.tenant.proxy.changed")
+	kafkaListener.Listen()
 
 	time.Sleep(5 * time.Second)
-	producer.Close()
-	cg.Close()
+
+	kafkaListener.Close()
+
+	//producer.Close()
+	//cg.Close()
 	//require.Nil(t, err)
 }
