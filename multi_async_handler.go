@@ -11,6 +11,7 @@ import (
 )
 
 var (
+	// ErrConsumerTopicsMissing indicates that the consumer topics config is missing
 	ErrConsumerTopicsMissing = errors.New("consumer topics is missing")
 )
 
@@ -38,6 +39,7 @@ type multiAsyncCGHandlerConfig struct {
 	ready chan bool
 }
 
+// NewMultiAsyncCG creates a new multi async consumer group and return consumer group handler
 func NewMultiAsyncCG(ctx context.Context, client sarama.Client, cfg map[string]interface{}, producer ProducerHandler, handlers ConsumerMsgHandlers) (ConsumerGroupHandler, error) {
 	groupID := "proxy-provisioner"
 	topics := []string{}
@@ -104,16 +106,19 @@ func (macg *multiAsyncCG) Cleanup(sarama.ConsumerGroupSession) error {
 	return nil
 }
 
+// WaitReady waits for the consumer ready
 func (macg *multiAsyncCG) WaitReady() {
 	<-macg.cfgHandler.ready
 	return
 }
 
+// Reset resets consumer ready
 func (macg *multiAsyncCG) Reset() {
 	macg.cfgHandler.ready = make(chan bool, 0)
 	return
 }
 
+// ConsumeClaim claims messages from topics
 func (macg *multiAsyncCG) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 
 	// NOTE:
@@ -132,10 +137,12 @@ func (macg *multiAsyncCG) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 	return nil
 }
 
+// Close terminates the consumer group
 func (macg *multiAsyncCG) Close() error {
 	return macg.cg.Close()
 }
 
+// Start launches different goroutines: one for consuming messages from topics and others for the workers to handle messages arrving to the buffer channel.
 func (macg *multiAsyncCG) Start() {
 	go func() {
 		for {
@@ -159,6 +166,7 @@ func (macg *multiAsyncCG) Start() {
 
 	for i := 0; i < macg.nbWorkers; i++ {
 		go func() {
+			//log.Warnln("bufchan", macg.cfgHandler.bufChan)
 			for message := range macg.cfgHandler.bufChan {
 				var err error
 
@@ -168,6 +176,21 @@ func (macg *multiAsyncCG) Start() {
 				if !ok {
 					log.Errorw("Producer handler not found", "topic", topic, "msg", string(message.Message.Value))
 					continue
+				}
+
+				if len(handler.Finalizer) > 0 {
+					defer func() {
+						for _, f := range handler.Finalizer {
+							f(macg.context, message)
+						}
+					}()
+				}
+
+				log.Infow("Kafka consumer receiving message...", "topic", topic, "msg", message.Message.Value)
+
+				// Execute les BEFORE funcs
+				for _, f := range handler.Before {
+					macg.context = f(macg.context, message)
 				}
 
 				var req interface{}
@@ -193,8 +216,13 @@ func (macg *multiAsyncCG) Start() {
 					resp = req
 				}
 
+				// Execute les AFTER funcs
+				for _, f := range handler.After {
+					macg.context = f(macg.context, resp)
+				}
+
 				// Encode response from service endoint
-				var msg []byte
+				var msg interface{}
 				if handler.Encode != nil {
 					msg, err = handler.Encode(macg.context, resp)
 					if err != nil {
@@ -202,13 +230,13 @@ func (macg *multiAsyncCG) Start() {
 						continue
 					}
 				} else {
-					msg = resp.([]byte)
+					msg = resp
 				}
 
 				if handler.Produce != nil && macg.producer != nil {
 					err = handler.Produce(macg.context, msg, macg.producer)
 					if err != nil {
-						log.Errorw("Failed to produce response message", "msg", string(msg), "err", err)
+						log.Errorw("Failed to produce response message", "msg", msg.(string), "err", err)
 						continue
 					}
 

@@ -16,6 +16,8 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/spf13/viper"
 
+	"github.com/Shopify/sarama"
+
 	log "github.com/uthng/golog"
 
 	"github.com/plezi/proxy-provisioner/libs/transport/kafka"
@@ -24,14 +26,25 @@ import (
 	//service "github.com/plezi/proxy-provisioner/service"
 )
 
-//func consumeRequest(ctx context.Context, msg *kafka.ConsumerSessionMessage) (interface{}, error) {
-//log.Infoln("message consumed:", string(msg.Message.Value))
+type contextKey string
 
-//return msg.Message.Value, nil
-//}
+var (
+	TopicPleziTenantProxyChanged            = "plezi.tenant.proxy.changed"
+	TopicProxyProvisionerTenantProxyChanged = "proxy-provisioner.tenant.proxy.changed"
+
+	ContextKeyTestingT = contextKey("testing.T")
+)
+
+func getContextKeyValue(ctx context.Context, k contextKey) interface{} {
+	if v := ctx.Value(k); v != nil {
+		return v
+	}
+
+	return nil
+}
 
 func produceResponse(ctx context.Context, data interface{}, producer kafka.ProducerHandler) error {
-	err := producer.Produce(data, "proxy-provisioner.tenant.proxy.changed")
+	err := producer.Produce(data, TopicProxyProvisionerTenantProxyChanged)
 
 	return err
 }
@@ -39,7 +52,7 @@ func produceResponse(ctx context.Context, data interface{}, producer kafka.Produ
 func decodeRequest(ctx context.Context, request interface{}) (interface{}, error) {
 	req := request.(*kafka.ConsumerSessionMessage)
 
-	pbReq := &pb.CreateProxyRequest{
+	pbReq := &pb.HandleProxyRequest{
 		Proxy: &pb.Proxy{},
 	}
 
@@ -52,7 +65,7 @@ func decodeRequest(ctx context.Context, request interface{}) (interface{}, error
 }
 
 func encodeResponse(ctx context.Context, response interface{}) ([]byte, error) {
-	msgBytes, err := proto.Marshal(response.(*pb.CreateProxyRequest))
+	msgBytes, err := proto.Marshal(response.(*pb.HandleProxyRequest))
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +74,7 @@ func encodeResponse(ctx context.Context, response interface{}) ([]byte, error) {
 }
 
 func encodeRequest(ctx context.Context, request interface{}) ([]byte, error) {
-	msgBytes, err := proto.Marshal(request.(*pb.CreateProxyRequest))
+	msgBytes, err := proto.Marshal(request.(*pb.HandleProxyRequest))
 	if err != nil {
 		return nil, err
 	}
@@ -69,42 +82,75 @@ func encodeRequest(ctx context.Context, request interface{}) ([]byte, error) {
 	return msgBytes, nil
 }
 
-func makeTestKafkaEndpoint() endpoint.Endpoint {
+func makeTransformKafkaEndpoint() endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
-		log.Warnln("Hello ! This is an endpoint.")
-		log.Warnln("Endpoint request:", request)
+		req := request.(*pb.HandleProxyRequest)
+
+		req.TenantId = "output"
+		req.Proxy.Origin = "output.kafka.topic"
 
 		return request, nil
 	}
 }
 
+func initTestEnv(brokers []string) error {
+	topics := []string{TopicPleziTenantProxyChanged, TopicProxyProvisionerTenantProxyChanged}
+
+	log.Infow("Initializing cluster kafka for test...")
+	clusterAdmin, err := sarama.NewClusterAdmin(brokers, sarama.NewConfig())
+	if err != nil {
+		return err
+	}
+
+	defer clusterAdmin.Close()
+
+	clusterTopics, err := clusterAdmin.ListTopics()
+	if err != nil {
+		return err
+	}
+
+	for _, name := range topics {
+		if _, ok := clusterTopics[name]; ok {
+			log.Infow("Deleting topic...", "topic", name)
+			err := clusterAdmin.DeleteTopic(name)
+			if err != nil {
+				log.Errorln(err)
+				return err
+			}
+
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	for _, name := range topics {
+		log.Infow("Creating topic...", "topic", name)
+		err := clusterAdmin.CreateTopic(name, &sarama.TopicDetail{NumPartitions: 1, ReplicationFactor: 1}, false)
+		if err != nil {
+			log.Errorln(err)
+			return err
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+
+	return nil
+}
+
+// TestConsumer tests the message flow from producer to consumer with different steps.
+// In this test, the producer and the consumer, each one plays 2 roles: internal et external.
+// - Producer as external client produces a message to the topic for which is waiting the consumer
+// - Consumer reads the message, applies beforefunc, decodes, calls service via endpoint, applies afterfunc, encodes and write it to the output topic
+// - Consumer as external client reads the output topic
 func TestConsumer(t *testing.T) {
 
-	//testCases := []struct {
-	//name   string
-	//req    *pb.CreateProxyRequest
-	//err    interface{}
-	//result map[string]interface{}
-	//}{
-	//{
-	//},
-
-	//for _, tc := range testCases {
-	//t.Run(tc.name, func(t *testing.T) {
-
-	//})
-	//}
-	//brokers := []string{"localhost:9092"}
-	//topics := []string{"plezi.tenant.proxy.changed"}
-	//kind := "multi-async"
-	//groupID := "proxy-provisioner"
-
-	pbReq := &pb.CreateProxyRequest{
+	pbReq := &pb.HandleProxyRequest{
 		TenantId: "tenant1",
+		Action:   pb.ProxyAction_CREATE,
 		Proxy: &pb.Proxy{
-			Origin: "analytic.plezi.co",
-			Type:   1,
-			Proxy:  "app.plezi.co",
+			Origin:   "analytic.plezi.co",
+			Type:     1,
+			Proxy:    "app.plezi.co",
+			Verified: false,
 		},
 	}
 
@@ -120,7 +166,8 @@ kafka:
     nbWorkers: 1
     bufferSize: 10
     topics:
-      - plezi.tenant.proxy.changed
+      - ` + TopicPleziTenantProxyChanged + `
+      - ` + TopicProxyProvisionerTenantProxyChanged + `
   producer:
     topics:
       - name: proxy-provisioner.tenant.proxy.changed
@@ -131,48 +178,70 @@ kafka:
 	viper.ReadConfig(bytes.NewBuffer(kafkaConfig))
 
 	cfg := viper.GetStringMap("kafka")
+	ctx := context.Background()
 
-	pMsgHandlers := map[string]kafka.ProducerMsgHandler{
-		"plezi.tenant.proxy.changed": kafka.ProducerMsgHandler{
-			Encode: encodeRequest,
-		},
-		"proxy-provisioner.tenant.proxy.changed": kafka.ProducerMsgHandler{
-			Encode: nil,
-		},
-	}
+	ctx = context.WithValue(ctx, ContextKeyTestingT, t)
 
-	//producer, err := kafka.NewAsyncProducer(context.Background(), brokers, producerHandlers)
-	//require.Nil(t, err)
-
-	//err = producer.Produce(pbReq, topics[0])
-	//require.Nil(t, err)
-
-	cMsgHandlers := map[string]kafka.ConsumerMsgHandler{
-		"plezi.tenant.proxy.changed": kafka.ConsumerMsgHandler{
-			Endpoint: makeTestKafkaEndpoint(),
-			Decode:   decodeRequest,
-			Encode:   encodeResponse,
-			//Consume: consumeRequest,
-			Produce: produceResponse,
-		},
-	}
-
-	kafkaListener, err := kafka.NewListener(context.Background(), cfg, pMsgHandlers, cMsgHandlers)
+	err := initTestEnv(viper.GetStringSlice("kafka.brokers"))
 	require.Nil(t, err)
 
-	//cg, err := kafka.NewConsumerGroup(context.Background(), brokers, topics, kind, groupID, producer, handlers)
-	//require.Nil(t, err)
+	pMsgHandlers := map[string]*kafka.ProducerMsgHandler{
+		TopicPleziTenantProxyChanged: kafka.NewProducerMsgHandler(
+			encodeRequest,
+			[]kafka.ProducerMsgOption{}...),
+		TopicProxyProvisionerTenantProxyChanged: kafka.NewProducerMsgHandler(
+			nil,
+			[]kafka.ProducerMsgOption{}...),
+	}
 
-	//cg.Start()
+	cMsgHandlers := map[string]*kafka.ConsumerMsgHandler{
+		TopicPleziTenantProxyChanged: kafka.NewConsumerMsgHandler(
+			makeTransformKafkaEndpoint(),
+			decodeRequest,
+			encodeResponse,
+			produceResponse,
+			[]kafka.ConsumerMsgOption{}...),
+		TopicProxyProvisionerTenantProxyChanged: kafka.NewConsumerMsgHandler(
+			nil,
+			decodeRequest,
+			nil,
+			nil,
+			kafka.ConsumerMsgHandlerAfter(func(ctx context.Context, data interface{}) context.Context {
+				expected := &pb.HandleProxyRequest{
+					TenantId: "output",
+					Action:   pb.ProxyAction_CREATE,
+					Proxy: &pb.Proxy{
+						Origin:   "output.kafka.topic",
+						Type:     pb.ProxyType_FIRST_PARTY_COOKIE,
+						Proxy:    "app.plezi.co",
+						Verified: false,
+					},
+				}
 
-	kafkaListener.P.Produce(pbReq, "plezi.tenant.proxy.changed")
+				result := data.(*pb.HandleProxyRequest)
+
+				t := getContextKeyValue(ctx, ContextKeyTestingT).(*testing.T)
+
+				byte1, err := proto.Marshal(expected)
+				require.Nil(t, err)
+
+				byte2, err := proto.Marshal(result)
+				require.Nil(t, err)
+
+				log.Infow("Comparing test values...")
+				require.Equal(t, byte1, byte2)
+
+				return ctx
+			})),
+	}
+
+	kafkaListener, err := kafka.NewListener(ctx, cfg, pMsgHandlers, cMsgHandlers)
+	require.Nil(t, err)
+
 	kafkaListener.Listen()
+	kafkaListener.P.Produce(pbReq, TopicPleziTenantProxyChanged)
 
 	time.Sleep(5 * time.Second)
 
 	kafkaListener.Close()
-
-	//producer.Close()
-	//cg.Close()
-	//require.Nil(t, err)
 }

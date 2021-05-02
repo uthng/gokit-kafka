@@ -36,13 +36,18 @@ type EncodeRequestFunc func(context.Context, interface{}) ([]byte, error)
 
 //type ProduceResponseFunc func(context.Context, interface{}, *AsyncProducer) error
 
-//type ConsumeRequestFunc func(context.Context, *ConsumerSessionMessage) (interface{}, error)
+//type ConsumeRequestFunc func(context.Context, *ProducerSessionMessage) (interface{}, error)
 
 type ProducerMsgHandler struct {
 	Encode EncodeRequestFunc
+
+	Before []BeforeFunc
+	After  []AfterFunc
 }
 
-type ProducerMsgHandlers map[string]ProducerMsgHandler
+type ProducerMsgHandlers map[string]*ProducerMsgHandler
+
+type ProducerMsgOption func(*ProducerMsgHandler)
 
 // NewProducer creates an instance sarama async producer
 func NewAsyncProducer(ctx context.Context, client sarama.Client, handlers ProducerMsgHandlers) (ProducerHandler, error) {
@@ -100,4 +105,29 @@ func (p *asyncProducer) Close() error {
 	}
 
 	return nil
+}
+
+// NewProducerMsgHandler creates a new consumer message handler
+func NewProducerMsgHandler(enc EncodeRequestFunc, options ...ProducerMsgOption) *ProducerMsgHandler {
+	h := &ProducerMsgHandler{
+		Encode: enc,
+	}
+
+	for _, option := range options {
+		option(h)
+	}
+
+	return h
+}
+
+// ProducerMsgHandlerBefore functions are executed on the publisher request object before the
+// request is decoded.
+func ProducerMsgHandlerBefore(before ...BeforeFunc) ProducerMsgOption {
+	return func(h *ProducerMsgHandler) { h.Before = append(h.Before, before...) }
+}
+
+// ProducerMsgHandlerAfter functions are executed on the subscriber reply after the
+// endpoint is invoked, but before anything is published to the reply.
+func ProducerMsgHandlerAfter(after ...AfterFunc) ProducerMsgOption {
+	return func(h *ProducerMsgHandler) { h.After = append(h.After, after...) }
 }

@@ -50,12 +50,19 @@ type ConsumerMsgHandler struct {
 	Decode DecodeRequestFunc
 	Encode EncodeResponseFunc
 
+	Before    []BeforeFunc
+	After     []AfterFunc
+	Finalizer []FinalizerFunc
+
 	//Consume ConsumeRequestFunc
 	Produce ProduceResponseFunc
 }
 
-// Handlers is a map between topic and specific handlers
-type ConsumerMsgHandlers map[string]ConsumerMsgHandler
+// ConsumerMsgHandlers is a map between topic and specific handlers
+type ConsumerMsgHandlers map[string]*ConsumerMsgHandler
+
+// ConsumerMsgOption set an option param func for ConsumerMsgHandler
+type ConsumerMsgOption func(*ConsumerMsgHandler)
 
 // NewConsumerGroup creates a new consumer group and returns a consumer group handler
 func NewConsumerGroup(ctx context.Context, client sarama.Client, config map[string]interface{}, producer ProducerHandler, handlers ConsumerMsgHandlers) (ConsumerGroupHandler, error) {
@@ -71,4 +78,37 @@ func NewConsumerGroup(ctx context.Context, client sarama.Client, config map[stri
 	}
 
 	return nil, nil
+}
+
+// NewConsumerMsgHandler creates a new consumer message handler
+func NewConsumerMsgHandler(e endpoint.Endpoint, dec DecodeRequestFunc, enc EncodeResponseFunc, p ProduceResponseFunc, options ...ConsumerMsgOption) *ConsumerMsgHandler {
+	h := &ConsumerMsgHandler{
+		Endpoint: e,
+		Decode:   dec,
+		Encode:   enc,
+		Produce:  p,
+	}
+
+	for _, option := range options {
+		option(h)
+	}
+
+	return h
+}
+
+// ConsumerMsgHandlerBefore functions are executed on the publisher request object before the
+// request is decoded.
+func ConsumerMsgHandlerBefore(before ...BeforeFunc) ConsumerMsgOption {
+	return func(h *ConsumerMsgHandler) { h.Before = append(h.Before, before...) }
+}
+
+// ConsumerMsgHandlerAfter functions are executed on the consumer reply after the
+// endpoint is invoked, but before anything is published to the reply.
+func ConsumerMsgHandlerAfter(after ...AfterFunc) ConsumerMsgOption {
+	return func(h *ConsumerMsgHandler) { h.After = append(h.After, after...) }
+}
+
+// ConsumerMsgHandlerFinalizer functions are executed on the consumer on quitting the function (defer)
+func ConsumerMsgHandlerFinalizer(finalizer ...FinalizerFunc) ConsumerMsgOption {
+	return func(h *ConsumerMsgHandler) { h.Finalizer = append(h.Finalizer, finalizer...) }
 }
