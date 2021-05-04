@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	ErrProducerMsgHandlerNotFound = errors.New("producer handler not found")
+	ErrProducerTopicMsgHandlerNotFound = errors.New("producer handler for topic not found")
 )
 
 type ProducerHandler interface {
@@ -70,8 +70,8 @@ func (p *asyncProducer) Produce(request interface{}, topic string) error {
 
 	handler, ok := p.handlers[topic]
 	if !ok {
-		log.Errorw("producer handler not found", "topic", topic)
-		return ErrProducerMsgHandlerNotFound
+		log.Errorw("producer handler for not found", "topic", topic)
+		return ErrProducerTopicMsgHandlerNotFound
 	}
 
 	var msg []byte

@@ -8,6 +8,8 @@ import (
 
 	"github.com/Shopify/sarama"
 	"github.com/spf13/cast"
+
+	log "github.com/uthng/golog"
 )
 
 var (
@@ -17,6 +19,9 @@ var (
 )
 
 type Listener struct {
+	brokers []string
+
+	C  sarama.Client
 	P  ProducerHandler
 	CG ConsumerGroupHandler
 }
@@ -70,12 +75,15 @@ func NewListener(ctx context.Context, config map[string]interface{}, pMsgHandler
 	}
 
 	return &Listener{
-		P:  pHandler,
-		CG: cgHandler,
+		brokers: brokers,
+		C:       client,
+		P:       pHandler,
+		CG:      cgHandler,
 	}, nil
 }
 
 func (l *Listener) Listen() {
+	log.Infow("Kafka Listener starts...", "brokers", l.brokers)
 	l.CG.Start()
 }
 

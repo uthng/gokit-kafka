@@ -61,7 +61,11 @@ func NewMultiAsyncCG(ctx context.Context, client sarama.Client, cfg map[string]i
 		return nil, ErrConsumerTopicsMissing
 	}
 
-	topics = cast.ToStringSlice(m)
+	sTopics := cast.ToSlice(m)
+	for _, k := range sTopics {
+		m := cast.ToStringMapString(k)
+		topics = append(topics, m["name"])
+	}
 
 	m, ok = cfg["nbWorkers"]
 	if ok {
@@ -145,6 +149,7 @@ func (macg *multiAsyncCG) Close() error {
 // Start launches different goroutines: one for consuming messages from topics and others for the workers to handle messages arrving to the buffer channel.
 func (macg *multiAsyncCG) Start() {
 	go func() {
+		log.Infow("Kafka Multi Async Consumer Group starts consuming...", "groupID", macg.groupID, "topics", macg.topics)
 		for {
 			err := macg.cg.Consume(macg.context, macg.topics, macg)
 			if err != nil {
@@ -164,6 +169,7 @@ func (macg *multiAsyncCG) Start() {
 
 	macg.WaitReady() // Await till the consumer has been set up
 
+	log.Infow("Kafka Consumer Worker start...", "nbWorkers", macg.nbWorkers, "bufferSize", macg.bufferSize)
 	for i := 0; i < macg.nbWorkers; i++ {
 		go func() {
 			//log.Warnln("bufchan", macg.cfgHandler.bufChan)
