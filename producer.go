@@ -70,7 +70,7 @@ func (p *asyncProducer) Produce(request interface{}, topic string) error {
 
 	handler, ok := p.handlers[topic]
 	if !ok {
-		log.Errorw("producer handler for not found", "topic", topic)
+		log.Errorw("Producer handler for not found", "topic", topic)
 		return ErrProducerTopicMsgHandlerNotFound
 	}
 
