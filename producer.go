@@ -13,9 +13,11 @@ import (
 )
 
 var (
+	// ErrProducerTopicMsgHandlerNotFound indicates that no message handler is found for the given topic
 	ErrProducerTopicMsgHandlerNotFound = errors.New("producer handler for topic not found")
 )
 
+// ProducerHandler is an interface for Producer
 type ProducerHandler interface {
 	Produce(msg interface{}, topic string) error
 	Close() error
@@ -38,6 +40,7 @@ type EncodeRequestFunc func(context.Context, interface{}) ([]byte, error)
 
 //type ConsumeRequestFunc func(context.Context, *ProducerSessionMessage) (interface{}, error)
 
+// ProducerMsgHandler represents a kafka message handler
 type ProducerMsgHandler struct {
 	Encode EncodeRequestFunc
 
@@ -45,8 +48,10 @@ type ProducerMsgHandler struct {
 	After  []AfterFunc
 }
 
+// ProducerMsgHandlers is a map between topic & message handler
 type ProducerMsgHandlers map[string]*ProducerMsgHandler
 
+// ProducerMsgOption is an option function
 type ProducerMsgOption func(*ProducerMsgHandler)
 
 // NewProducer creates an instance sarama async producer
